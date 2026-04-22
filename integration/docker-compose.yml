@@ -1,0 +1,98 @@
+version: "3.8"
+
+services:
+  next-db:
+    image: postgres:16-alpine
+    container_name: next-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-next}
+      POSTGRES_USER: ${POSTGRES_USER:-next}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Define POSTGRES_PASSWORD}
+    volumes:
+      - next-db-data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-next} -d ${POSTGRES_DB:-next}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - coolify
+
+  next-api:
+    image: next-api:latest
+    container_name: next-api
+    restart: unless-stopped
+    build:
+      context: ../api
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-next}:${POSTGRES_PASSWORD}@next-db:5432/${POSTGRES_DB:-next}
+      API_KEY: ${API_KEY:-changeme}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      MODEL_PATH: ${MODEL_PATH:-/app/models/model.pkl}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      next-db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.next-api.rule=Host(`api.next.thefuckinggoat.cloud`)"
+      - "traefik.http.routers.next-api.entryPoints=http,https"
+      - "traefik.http.routers.next-api.tls=true"
+      - "traefik.http.routers.next-api.tls.certresolver=letsencrypt"
+      - "traefik.http.services.next-api.loadbalancer.server.port=8000"
+      - "traefik.docker.network=coolify"
+    networks:
+      - coolify
+
+  next-dashboard:
+    image: next-dashboard:latest
+    container_name: next-dashboard
+    restart: unless-stopped
+    build:
+      context: ../dashboard
+      dockerfile: Dockerfile
+    environment:
+      NEXT_API_URL: http://next-api:8000
+      NEXT_API_EXTERNAL_URL: ${NEXT_API_EXTERNAL_URL:-https://api.next.thefuckinggoat.cloud}
+    depends_on:
+      next-api:
+        condition: service_healthy
+    ports:
+      - "8501:8501"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.next-dashboard.rule=Host(`next.thefuckinggoat.cloud`)"
+      - "traefik.http.routers.next-dashboard.entryPoints=http,https"
+      - "traefik.http.routers.next-dashboard.tls=true"
+      - "traefik.http.routers.next-dashboard.tls.certresolver=letsencrypt"
+      - "traefik.http.services.next-dashboard.loadbalancer.server.port=8501"
+      - "traefik.docker.network=coolify"
+    networks:
+      - coolify
+
+volumes:
+  next-db-data:
+
+networks:
+  coolify:
+    external: true
