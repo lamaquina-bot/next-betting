@@ -1,9 +1,12 @@
 """
 Rutas de bankroll: GET /bankroll, POST /bankroll/bet-result
+Incluye protección de datos financieros (Fix 5 - HIGH).
 """
+import os
 from datetime import date as date_type
+from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,12 +24,43 @@ router = APIRouter(prefix="/bankroll", tags=["Bankroll"])
 settings = get_settings()
 
 
+# --- Fix 5: Protección de datos financieros ---
+
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")  # Clave de admin (opcional)
+
+
+def _is_admin(request: Request) -> bool:
+    """Verificar si la petición viene de un admin mediante header."""
+    if not ADMIN_API_KEY:
+        # Si no hay ADMIN_API_KEY configurado, todos ven datos completos (modo dev)
+        return True
+    return request.headers.get("X-Admin-Key", "") == ADMIN_API_KEY
+
+
+def _mask_balance(balance: float) -> float:
+    """Enmascarar balance: mostrar solo magnitud relativa, no valor real."""
+    if balance == 0:
+        return 0.0
+    # Mostrar porcentaje del bankroll inicial en vez del monto real
+    return round(balance / settings.DEFAULT_BANKROLL * 100, 1)
+
+
+def _mask_pnl(pnl: float) -> str:
+    """Enmascarar PnL: mostrar solo signo, no magnitud exacta."""
+    if pnl > 0:
+        return "positivo"
+    elif pnl < 0:
+        return "negativo"
+    return "neutro"
+
+
 @router.get("/", response_model=list[BankrollResponse])
 async def get_bankroll_history(
+    request: Request,
     days: int = Query(30, ge=1, le=365, description="Últimos N días"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Obtener historial de bankroll"""
+    """Obtener historial de bankroll. Datos financieros enmascarados para no-admins."""
     query = (
         select(BankrollHistory)
         .order_by(BankrollHistory.date.desc())
@@ -35,19 +69,30 @@ async def get_bankroll_history(
     result = await db.execute(query)
     history = result.scalars().all()
 
+    is_admin = _is_admin(request)
+
     # Si no hay historial, devolver entrada inicial
     if not history:
-        return [
-            BankrollHistory(
-                date=date_type.today(),
-                balance=settings.DEFAULT_BANKROLL,
-                daily_pnl=0.0,
-                total_bets=0,
-                wins=0,
-                losses=0,
-                roi=0.0,
-            )
-        ]
+        initial = BankrollHistory(
+            date=date_type.today(),
+            balance=settings.DEFAULT_BANKROLL,
+            daily_pnl=0.0,
+            total_bets=0,
+            wins=0,
+            losses=0,
+            roi=0.0,
+        )
+        if not is_admin:
+            initial.balance = _mask_balance(initial.balance)
+            initial.daily_pnl = 0.0
+        return [initial]
+
+    # Fix 5: Enmascarar datos financieros para usuarios no-admin
+    if not is_admin:
+        for entry in history:
+            entry.balance = _mask_balance(entry.balance)
+            # Mantener daily_pnl solo como signo
+            entry.daily_pnl = 1.0 if entry.daily_pnl > 0 else (-1.0 if entry.daily_pnl < 0 else 0.0)
 
     return history
 
