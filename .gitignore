@@ -1,0 +1,12 @@
+# .gitignore
+__pycache__/
+*.pyc
+.env
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.venv/
+venv/
+*.db
+node_modules/
