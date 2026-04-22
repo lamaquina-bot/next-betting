@@ -18,10 +18,10 @@ from app.schemas.bankroll import (
     BetResultRequest,
     BetResultResponse,
 )
-from app.config import get_settings
+from app.config import settings
 
 router = APIRouter(prefix="/bankroll", tags=["Bankroll"])
-settings = get_settings()
+
 
 
 # --- Fix 5: Protección de datos financieros ---
@@ -42,7 +42,7 @@ def _mask_balance(balance: float) -> float:
     if balance == 0:
         return 0.0
     # Mostrar porcentaje del bankroll inicial en vez del monto real
-    return round(balance / settings.DEFAULT_BANKROLL * 100, 1)
+    return round(balance / settings.initial_bankroll * 100, 1)
 
 
 def _mask_pnl(pnl: float) -> str:
@@ -75,7 +75,7 @@ async def get_bankroll_history(
     if not history:
         initial = BankrollHistory(
             date=date_type.today(),
-            balance=settings.DEFAULT_BANKROLL,
+            balance=settings.initial_bankroll,
             daily_pnl=0.0,
             total_bets=0,
             wins=0,
@@ -145,7 +145,7 @@ async def register_bet_result(
         else:
             bankroll.losses += 1
         # ROI = (profit total / bankroll inicial) * 100
-        initial = settings.DEFAULT_BANKROLL
+        initial = settings.initial_bankroll
         bankroll.roi = ((bankroll.balance - initial) / initial) * 100 if initial > 0 else 0.0
     else:
         # Crear nueva entrada diaria
@@ -154,7 +154,7 @@ async def register_bet_result(
             select(BankrollHistory).order_by(BankrollHistory.date.desc()).limit(1)
         )
         last = last_br.scalar_one_or_none()
-        prev_balance = last.balance if last else settings.DEFAULT_BANKROLL
+        prev_balance = last.balance if last else settings.initial_bankroll
 
         total_bets = (last.total_bets + 1) if last else 1
         wins = ((last.wins if last else 0) + (1 if request.won else 0))
@@ -167,8 +167,8 @@ async def register_bet_result(
             total_bets=total_bets,
             wins=wins,
             losses=losses,
-            roi=((prev_balance + profit - settings.DEFAULT_BANKROLL) / settings.DEFAULT_BANKROLL) * 100
-            if settings.DEFAULT_BANKROLL > 0
+            roi=((prev_balance + profit - settings.initial_bankroll) / settings.initial_bankroll) * 100
+            if settings.initial_bankroll > 0
             else 0.0,
         )
         db.add(bankroll)

@@ -1,24 +1,20 @@
 """
 Configuración de base de datos PostgreSQL con SQLAlchemy async.
-Proporciona la sesión de BD para inyección en FastAPI.
 """
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 
-from app.config import get_settings
-
-settings = get_settings()
+from app.config import settings
 
 # Engine async para PostgreSQL
 engine = create_async_engine(
-    settings.DATABASE_URL,
-    echo=settings.DEBUG,
+    settings.database_url,
+    echo=settings.debug,
     pool_size=10,
     max_overflow=20,
     pool_pre_ping=True,
 )
 
-# Fábrica de sesiones async
 async_session = async_sessionmaker(
     engine,
     class_=AsyncSession,

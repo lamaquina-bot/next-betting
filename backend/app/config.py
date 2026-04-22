@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
+    # Bankroll
+    initial_bankroll: float = 100000  # $100K USD
+
     # App
     app_name: str = "NEXT API"
     debug: bool = True

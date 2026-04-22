@@ -44,13 +44,13 @@ st.caption("Plataforma de apuestas de valor")
 
 # ── KPI row ─────────────────────────────────────────────────────────────
 bankroll_data = api_get("bankroll")
-picks_data = api_get("picks/today")
-stats_data = api_get("stats")
+value_bets_data = api_get("value-bets/today")
+dashboard_data = api_get("dashboard/summary")
 
-bankroll_val = bankroll_data.get("balance", 0) if bankroll_data else 0
-roi_val = stats_data.get("roi", 0.0) if stats_data else 0.0
-win_rate_val = stats_data.get("win_rate", 0.0) if stats_data else 0.0
-picks_count = len(picks_data) if isinstance(picks_data, list) else 0
+bankroll_val = dashboard_data.get("current_balance", 0) if dashboard_data else 0
+roi_val = dashboard_data.get("roi", 0.0) if dashboard_data else 0.0
+win_rate_val = dashboard_data.get("win_rate", 0.0) if dashboard_data else 0.0
+picks_count = len(value_bets_data) if isinstance(value_bets_data, list) else 0
 
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("💰 Bankroll", f"${bankroll_val:,.0f}")
@@ -71,9 +71,9 @@ tab1, tab2, tab3, tab4 = st.tabs([
 # ── Tab 1: Value Bets Hoy ──────────────────────────────────────────────
 with tab1:
     st.header("Value Bets de Hoy")
-    if picks_data and isinstance(picks_data, list) and len(picks_data) > 0:
-        df = pd.DataFrame(picks_data)
-        display_cols = [c for c in ["fixture", "outcome", "probability", "odds", "edge", "stake"] if c in df.columns]
+    if value_bets_data and isinstance(value_bets_data, list) and len(value_bets_data) > 0:
+        df = pd.DataFrame(value_bets_data)
+        display_cols = [c for c in ["fixture_id", "outcome", "model_prob", "market_odds", "edge_pct", "stake"] if c in df.columns]
         st.dataframe(
             df[display_cols],
             use_container_width=True,
@@ -85,7 +85,7 @@ with tab1:
 # ── Tab 2: Bankroll ────────────────────────────────────────────────────
 with tab2:
     st.header("Evolución del Bankroll")
-    history = api_get("bankroll/history")
+    history = api_get("bankroll?days=90")
     if history and isinstance(history, list) and len(history) > 0:
         df_hist = pd.DataFrame(history)
         if "date" in df_hist.columns and "balance" in df_hist.columns:
@@ -112,7 +112,7 @@ with tab2:
 # ── Tab 3: Performance ─────────────────────────────────────────────────
 with tab3:
     st.header("Métricas de Rendimiento")
-    perf = api_get("stats/performance")
+    perf = api_get("dashboard/summary")
     if perf:
         c1, c2, c3 = st.columns(3)
         c1.metric("Sharpe Ratio", f"{perf.get('sharpe_ratio', 0):.2f}")
@@ -142,7 +142,7 @@ with tab3:
 # ── Tab 4: Historial ───────────────────────────────────────────────────
 with tab4:
     st.header("Historial de Apuestas")
-    history_bets = api_get("bets/history")
+    history_bets = api_get("value-bets?status=resolved")
     if history_bets and isinstance(history_bets, list) and len(history_bets) > 0:
         df_bets = pd.DataFrame(history_bets)
         display_cols = [c for c in ["date", "fixture", "outcome", "odds", "stake", "result", "profit"] if c in df_bets.columns]

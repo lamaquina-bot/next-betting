@@ -13,10 +13,10 @@ from app.models.bankroll import BankrollHistory
 from app.models.prediction import ValueBet
 from app.models.fixture import Fixture
 from app.schemas.bankroll import DashboardSummary
-from app.config import get_settings
+from app.config import settings
 
 router = APIRouter(prefix="/dashboard", tags=["Dashboard"])
-settings = get_settings()
+
 
 
 @router.get("/summary", response_model=DashboardSummary)
@@ -48,14 +48,14 @@ async def get_dashboard_summary(
             losses=bankroll.losses,
             win_rate=round(win_rate, 1),
             roi=round(bankroll.roi, 2),
-            profit_units=round(bankroll.balance - settings.DEFAULT_BANKROLL, 2),
+            profit_units=round(bankroll.balance - settings.initial_bankroll, 2),
             pending_bets=pending_bets,
             last_updated=bankroll.created_at,
         )
 
     # Sin datos: devolver estado inicial
     return DashboardSummary(
-        current_balance=settings.DEFAULT_BANKROLL,
+        current_balance=settings.initial_bankroll,
         total_bets=0,
         wins=0,
         losses=0,
