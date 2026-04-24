@@ -1,7 +1,7 @@
 """
 Rutas de apuestas de valor: GET /value-bets, GET /value-bets/today
 """
-from datetime import datetime, date
+from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
@@ -85,9 +85,8 @@ async def get_today_value_bets(
     Apuestas de valor para los partidos de hoy.
     Endpoint principal para alertas y dashboard.
     """
-    today = date.today()
-    tomorrow = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-    end_of_day = tomorrow.replace(hour=23, minute=59, second=59)
+    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    today_end = today_start.replace(hour=23, minute=59, second=59)
 
     # Value bets con fixtures de hoy
     query = (
@@ -97,8 +96,8 @@ async def get_today_value_bets(
         .where(
             and_(
                 ValueBet.status == "pending",
-                Fixture.date >= tomorrow,
-                Fixture.date <= end_of_day,
+                Fixture.date >= today_start,
+                Fixture.date <= today_end,
             )
         )
         .order_by(ValueBet.edge.desc())

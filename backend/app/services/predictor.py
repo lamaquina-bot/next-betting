@@ -188,13 +188,32 @@ class Predictor:
             }
 
         features = self.build_features(avg_home_odds, avg_draw_odds, avg_away_odds, match_date)
+        if features.size == 0:
+            # feature_names empty — fallback to implied probabilities
+            h = 1.0 / avg_home_odds if avg_home_odds > 0 else 0.33
+            d = 1.0 / avg_draw_odds if avg_draw_odds > 0 else 0.33
+            a = 1.0 / avg_away_odds if avg_away_odds > 0 else 0.33
+            total = h + d + a
+            return {
+                "home_prob": round(h / total, 4),
+                "draw_prob": round(d / total, 4),
+                "away_prob": round(a / total, 4),
+                "confidence": 0.0,
+                "model_version": self.model_version + "-no-features",
+            }
+
         probs = self.model.predict_proba(features.reshape(1, -1))[0]
 
-        # Label encoder: classes = ['A', 'D', 'H']
-        # probs order matches: [A_prob, D_prob, H_prob]
-        away_prob = float(probs[0])
-        draw_prob = float(probs[1])
-        home_prob = float(probs[2])
+        # Use label_encoder classes to map probabilities correctly
+        if self.label_encoder and hasattr(self.label_encoder, 'classes_'):
+            classes = list(self.label_encoder.classes_)
+        else:
+            classes = ['A', 'D', 'H']
+
+        prob_map = {cls: float(p) for cls, p in zip(classes, probs)}
+        home_prob = prob_map.get('H', 0.0)
+        draw_prob = prob_map.get('D', 0.0)
+        away_prob = prob_map.get('A', 0.0)
 
         return {
             "home_prob": round(home_prob, 4),

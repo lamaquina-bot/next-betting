@@ -71,28 +71,35 @@ async def get_bankroll_history(
 
     is_admin = _is_admin(request)
 
-    # Si no hay historial, devolver entrada inicial
+    # Si no hay historial, devolver entrada inicial como dict (sin id de BD)
     if not history:
-        initial = BankrollHistory(
-            date=date_type.today(),
-            balance=settings.initial_bankroll,
-            daily_pnl=0.0,
-            total_bets=0,
-            wins=0,
-            losses=0,
-            roi=0.0,
-        )
+        balance_val = settings.initial_bankroll
+        pnl_val = 0.0
         if not is_admin:
-            initial.balance = _mask_balance(initial.balance)
-            initial.daily_pnl = 0.0
-        return [initial]
+            balance_val = _mask_balance(balance_val)
+        return [{
+            "id": 0,
+            "date": date_type.today(),
+            "balance": balance_val,
+            "daily_pnl": pnl_val,
+            "total_bets": 0,
+            "wins": 0,
+            "losses": 0,
+            "roi": 0.0,
+        }]
 
     # Fix 5: Enmascarar datos financieros para usuarios no-admin
     if not is_admin:
-        for entry in history:
-            entry.balance = _mask_balance(entry.balance)
-            # Mantener daily_pnl solo como signo
-            entry.daily_pnl = 1.0 if entry.daily_pnl > 0 else (-1.0 if entry.daily_pnl < 0 else 0.0)
+        return [{
+            "id": entry.id,
+            "date": entry.date,
+            "balance": _mask_balance(entry.balance),
+            "daily_pnl": 1.0 if entry.daily_pnl > 0 else (-1.0 if entry.daily_pnl < 0 else 0.0),
+            "total_bets": entry.total_bets,
+            "wins": entry.wins,
+            "losses": entry.losses,
+            "roi": entry.roi,
+        } for entry in history]
 
     return history
 

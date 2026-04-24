@@ -1,7 +1,7 @@
 """
 Rutas de fixtures: GET /fixtures, GET /fixtures/upcoming, GET /fixtures/recent
 """
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date as date_type
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
@@ -20,8 +20,10 @@ router = APIRouter(prefix="/fixtures", tags=["Fixtures"])
 async def get_fixtures(
     league_id: Optional[int] = None,
     status: Optional[str] = None,
-    days_back: int = Query(365, ge=1, le=3650, description="Días hacia atrás"),
-    days_ahead: int = Query(7, ge=0, le=30, description="Días hacia adelante"),
+    date_from: Optional[date_type] = Query(None, description="Fecha inicio (YYYY-MM-DD)"),
+    date_to: Optional[date_type] = Query(None, description="Fecha fin (YYYY-MM-DD)"),
+    days_back: int = Query(365, ge=1, le=3650, description="Días hacia atrás (si no hay date_from)"),
+    days_ahead: int = Query(7, ge=0, le=30, description="Días hacia adelante (si no hay date_to)"),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
@@ -29,18 +31,17 @@ async def get_fixtures(
     """Obtener fixtures con filtros opcionales. Por defecto muestra partidos recientes."""
     query = select(Fixture).options(selectinload(Fixture.odds))
 
-    now = datetime.utcnow()
-
     if status:
         query = query.where(Fixture.status == status)
     if league_id:
         query = query.where(Fixture.league_id == league_id)
 
-    # Rango de fechas
-    date_from = now - timedelta(days=days_back)
-    date_to = now + timedelta(days=days_ahead)
-    query = query.where(Fixture.date >= date_from)
-    query = query.where(Fixture.date <= date_to)
+    # Rango de fechas: usar date_from/date_to si se proporcionan, sino days_back/days_ahead
+    now = datetime.utcnow()
+    start = datetime.combine(date_from, datetime.min.time()) if date_from else now - timedelta(days=days_back)
+    end = datetime.combine(date_to, datetime.max.time()) if date_to else now + timedelta(days=days_ahead)
+    query = query.where(Fixture.date >= start)
+    query = query.where(Fixture.date <= end)
 
     query = query.order_by(Fixture.date.desc()).offset(offset).limit(limit)
     result = await db.execute(query)
