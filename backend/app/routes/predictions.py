@@ -1,20 +1,18 @@
 """
 Rutas de predicciones: GET /predictions, GET /predictions/{id}, POST /predictions/generate
-v2: Usa features pre-calculadas desde fixture_features cuando están disponibles.
+v3: Lee features desde fixture_features (columnas reales, no JSON).
 """
-import json
 import logging
 from typing import Optional
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select, func, and_, text, delete
+from sqlalchemy import select, func, text, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.prediction import Prediction
 from app.models.fixture import Fixture, Odd
-from app.models.fixture_feature import FixtureFeature
 from app.schemas.prediction import PredictionResponse, GenerateRequest, GenerateResponse
 from app.services.predictor import predictor
 
@@ -51,17 +49,101 @@ async def get_prediction(
     return prediction
 
 
+async def _get_features_for_match(db: AsyncSession, feature_names: list[str],
+                                   home_team: str, away_team: str) -> dict | None:
+    """
+    Query fixture_features for the most recent match between these teams.
+    Returns a dict of {feature_name: value} for all model features.
+    """
+    # Build column list: always include id, and all feature_names that exist in the table
+    # Use raw SQL for flexibility
+    cols_str = ", ".join(f'"{c}"' for c in feature_names)
+    query = text(f"""
+        SELECT {cols_str}
+        FROM fixture_features
+        WHERE "HomeTeam" ILIKE :home AND "AwayTeam" ILIKE :away
+        ORDER BY id DESC
+        LIMIT 1
+    """)
+    try:
+        result = await db.execute(query, {"home": home_team, "away": away_team})
+        row = result.mappings().first()
+        if row:
+            return {k: float(v) if v is not None else None for k, v in row.items()}
+    except Exception as e:
+        logger.warning(f"[Features] Query error for {home_team} vs {away_team}: {e}")
+        # Some columns might not exist — try again with only existing columns
+        pass
+
+    # Fallback: try with just the columns that exist
+    try:
+        # Get actual column names from DB
+        col_result = await db.execute(text("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'fixture_features'
+        """))
+        db_cols = {r[0] for r in col_result.all()}
+
+        available = [f for f in feature_names if f in db_cols]
+        if not available:
+            return None
+
+        cols_str = ", ".join(f'"{c}"' for c in available)
+        query = text(f"""
+            SELECT {cols_str}
+            FROM fixture_features
+            WHERE "HomeTeam" ILIKE :home AND "AwayTeam" ILIKE :away
+            ORDER BY id DESC
+            LIMIT 1
+        """)
+        result = await db.execute(query, {"home": home_team, "away": away_team})
+        row = result.mappings().first()
+        if row:
+            return {k: float(v) if v is not None else None for k, v in row.items()}
+    except Exception as e2:
+        logger.warning(f"[Features] Fallback query error: {e2}")
+
+    return None
+
+
+async def _get_median_features(db: AsyncSession, feature_names: list[str]) -> dict:
+    """Compute median for each feature across all rows for fallback."""
+    try:
+        col_result = await db.execute(text("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'fixture_features'
+        """))
+        db_cols = {r[0] for r in col_result.all()}
+
+        available = [f for f in feature_names if f in db_cols]
+        if not available:
+            return {}
+
+        # Compute medians using percentile_cont
+        median_exprs = ", ".join(
+            f'percentile_cont(0.5) WITHIN GROUP (ORDER BY "{c}") as "{c}"'
+            for c in available
+        )
+        result = await db.execute(text(f"SELECT {median_exprs} FROM fixture_features"))
+        row = result.mappings().first()
+        if row:
+            return {k: float(v) if v is not None else 0.0 for k, v in row.items()}
+    except Exception as e:
+        logger.warning(f"[MedianFeatures] Error: {e}")
+    return {}
+
+
 @router.post("/generate", response_model=GenerateResponse)
 async def generate_predictions(
     request: GenerateRequest = GenerateRequest(),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Generar predicciones para fixtures que tengan odds disponibles.
-    Ahora usa features pre-calculadas desde fixture_features cuando están disponibles.
-    """
+    """Generar predicciones para fixtures con odds, usando features de fixture_features."""
     if not predictor._loaded:
         predictor.load_model()
+
+    feature_names = predictor.feature_names or []
+    median_features = await _get_median_features(db, feature_names)
 
     # Get fixtures with odds that don't have predictions yet
     subq = select(Prediction.fixture_id)
@@ -70,13 +152,12 @@ async def generate_predictions(
         .join(Odd, Fixture.id == Odd.fixture_id)
         .where(Fixture.id.notin_(subq))
     )
-
     if request.league_id:
         query = query.where(Fixture.league_id == request.league_id)
     if request.status:
         query = query.where(Fixture.status == request.status)
-
     query = query.limit(request.limit * 10)
+
     result = await db.execute(query)
     rows = result.all()
 
@@ -104,12 +185,24 @@ async def generate_predictions(
         avg_a = sum(data["away_odds"]) / len(data["away_odds"])
 
         try:
-            # Try to find pre-computed features for this match
-            features_dict = await _find_features(db, fixture.home_team, fixture.away_team)
+            features_dict = await _get_features_for_match(
+                db, feature_names, fixture.home_team, fixture.away_team
+            )
 
             if features_dict:
+                # Merge: features from DB + median for missing
+                merged = {}
+                for fn in feature_names:
+                    v = features_dict.get(fn)
+                    if v is not None:
+                        merged[fn] = v
+                    elif fn in median_features:
+                        merged[fn] = median_features[fn]
+                    else:
+                        merged[fn] = 0.0
+
                 pred = predictor.predict_with_features(
-                    features_dict, avg_h, avg_d, avg_a, fixture.date
+                    merged, avg_h, avg_d, avg_a, fixture.date
                 )
                 used_features += 1
             else:
@@ -140,113 +233,16 @@ async def generate_predictions(
     )
 
 
-async def _find_features(db: AsyncSession, home_team: str, away_team: str) -> dict | None:
-    """Look up pre-computed features from fixture_features table."""
-    # Try exact match first
-    result = await db.execute(
-        select(FixtureFeature)
-        .where(FixtureFeature.home_team == home_team)
-        .where(FixtureFeature.away_team == away_team)
-        .order_by(FixtureFeature.id.desc())
-        .limit(1)
-    )
-    ff = result.scalar_one_or_none()
-    if ff:
-        return ff.get_features()
-
-    # Try case-insensitive match
-    result = await db.execute(
-        select(FixtureFeature)
-        .where(func.lower(FixtureFeature.home_team) == home_team.lower())
-        .where(func.lower(FixtureFeature.away_team) == away_team.lower())
-        .order_by(FixtureFeature.id.desc())
-        .limit(1)
-    )
-    ff = result.scalar_one_or_none()
-    if ff:
-        return ff.get_features()
-
-    return None
-
-
-# ─────────────────────────────────────────────────────
-# Admin endpoints for loading features & regenerating
-# ─────────────────────────────────────────────────────
-
-@router.post("/admin/load-features", tags=["Admin"])
-async def load_features_from_csv(
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Load features from the embedded CSV into fixture_features table.
-    The CSV is bundled in the Docker image at /app/data/features.csv
-    """
-    import pandas as pd
-    from pathlib import Path
-
-    csv_path = Path("/app/data/features.csv")
-    if not csv_path.exists():
-        raise HTTPException(404, f"CSV not found at {csv_path}")
-
-    try:
-        df = pd.read_csv(csv_path)
-        logger.info(f"[LoadFeatures] CSV loaded: {len(df)} rows, {len(df.columns)} columns")
-
-        # Identify non-feature columns
-        id_cols = ['Date', 'HomeTeam', 'AwayTeam', 'FTR', 'League', 'Season',
-                    'FTHG', 'FTAG', 'FTR_raw', 'home_points', 'away_points',
-                    'result_code', 'goal_diff', 'total_goals', 'over_2_5', 'btts']
-        feature_cols = [c for c in df.columns if c not in id_cols]
-
-        # Check if table already has data
-        count_result = await db.execute(select(func.count()).select_from(FixtureFeature))
-        existing = count_result.scalar()
-        if existing > 0:
-            return {"status": "already_loaded", "count": existing}
-
-        # Insert in batches
-        batch_size = 500
-        inserted = 0
-
-        for start in range(0, len(df), batch_size):
-            batch = df.iloc[start:start + batch_size]
-            for _, row in batch.iterrows():
-                features = {col: float(row[col]) if pd.notna(row[col]) else 0.0
-                           for col in feature_cols}
-
-                ff = FixtureFeature(
-                    match_date=str(row.get('Date', '')),
-                    home_team=str(row.get('HomeTeam', '')),
-                    away_team=str(row.get('AwayTeam', '')),
-                    league=str(row.get('League', '')),
-                    season=str(row.get('Season', '')),
-                    ftr=str(row.get('FTR', '')),
-                    features_json=json.dumps(features),
-                )
-                db.add(ff)
-                inserted += 1
-
-            await db.flush()
-            logger.info(f"[LoadFeatures] Inserted {inserted}/{len(df)}")
-
-        await db.commit()
-        return {"status": "ok", "inserted": inserted, "features_per_row": len(feature_cols)}
-
-    except Exception as e:
-        await db.rollback()
-        logger.error(f"[LoadFeatures] Error: {e}")
-        raise HTTPException(500, f"Error loading features: {str(e)}")
-
-
 @router.post("/admin/regenerate", tags=["Admin"])
 async def regenerate_predictions(
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Delete all existing predictions and regenerate using real features.
-    """
+    """Delete all existing predictions and regenerate using real features from fixture_features."""
     if not predictor._loaded:
         predictor.load_model()
+
+    feature_names = predictor.feature_names or []
+    median_features = await _get_median_features(db, feature_names)
 
     # Delete existing predictions
     await db.execute(delete(Prediction))
@@ -285,11 +281,22 @@ async def regenerate_predictions(
         avg_a = sum(data["away_odds"]) / len(data["away_odds"])
 
         try:
-            features_dict = await _find_features(db, fixture.home_team, fixture.away_team)
+            features_dict = await _get_features_for_match(
+                db, feature_names, fixture.home_team, fixture.away_team
+            )
 
             if features_dict:
+                merged = {}
+                for fn in feature_names:
+                    v = features_dict.get(fn)
+                    if v is not None:
+                        merged[fn] = v
+                    elif fn in median_features:
+                        merged[fn] = median_features[fn]
+                    else:
+                        merged[fn] = 0.0
                 pred = predictor.predict_with_features(
-                    features_dict, avg_h, avg_d, avg_a, fixture.date
+                    merged, avg_h, avg_d, avg_a, fixture.date
                 )
                 used_features += 1
             else:
@@ -309,12 +316,12 @@ async def regenerate_predictions(
             db.add(prediction)
             generated += 1
 
-            # Commit in batches
             if generated % 500 == 0:
                 await db.flush()
                 logger.info(f"[Regenerate] {generated}/{len(fixtures_odds)} predictions")
 
         except Exception as e:
+            logger.error(f"[Regenerate] Error fixture {fid}: {e}")
             errors += 1
             continue
 
@@ -343,18 +350,15 @@ async def prediction_stats(
     db: AsyncSession = Depends(get_db),
 ):
     """Get prediction statistics including outcome distribution."""
-    # Total predictions
     total = await db.execute(select(func.count()).select_from(Prediction))
     total_count = total.scalar()
 
-    # Distribution
     dist = await db.execute(
         select(Prediction.predicted_outcome, func.count())
         .group_by(Prediction.predicted_outcome)
     )
     distribution = dict(dist.all())
 
-    # Average probabilities
     avg_probs = await db.execute(
         select(
             func.avg(Prediction.home_prob),
@@ -366,7 +370,7 @@ async def prediction_stats(
     avg_home, avg_draw, avg_away = float(row[0] or 0), float(row[1] or 0), float(row[2] or 0)
 
     # Features table count
-    feat_count = await db.execute(select(func.count()).select_from(FixtureFeature))
+    feat_count = await db.execute(text('SELECT COUNT(*) FROM fixture_features'))
     features_total = feat_count.scalar()
 
     return {
