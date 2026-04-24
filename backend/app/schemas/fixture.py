@@ -61,9 +61,22 @@ class FixtureUpcomingResponse(BaseModel):
     away_team: str
     date: datetime
     league_name: Optional[str] = None
+    status: Optional[str] = None
+    home_score: Optional[int] = None
+    away_score: Optional[int] = None
     best_home_odds: Optional[float] = None
     best_draw_odds: Optional[float] = None
     best_away_odds: Optional[float] = None
 
     class Config:
         from_attributes = True
+
+
+class FixtureStatsResponse(BaseModel):
+    """Estadísticas de fixtures"""
+    total_fixtures: int
+    total_odds: int
+    total_leagues: int
+    by_status: dict[str, int] = {}
+    date_from: Optional[datetime] = None
+    date_to: Optional[datetime] = None

@@ -4,7 +4,10 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     # Base de datos
-    database_url: str = "postgresql+asyncpg://next:next@localhost:5433/next_betting"
+    database_url: str = "postgresql+asyncpg://next:changeme_strong_prod@next-db-svc:5432/next_betting"
+
+    # Modelo ML
+    model_path: str = "models/latest_model.joblib"
 
     # APIs
     api_football_url: str = "https://v3.football.api-sports.io"
@@ -12,19 +15,16 @@ class Settings(BaseSettings):
     odds_api_url: str = "https://api.the-odds-api.com/v4"
     odds_api_key: str = ""
 
-    # Modelo ML
-    model_path: str = "models/latest_model.joblib"
-
     # Telegram
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
     # Bankroll
-    initial_bankroll: float = 100000  # $100K USD
+    initial_bankroll: float = 100000
 
     # App
     app_name: str = "NEXT API"
-    debug: bool = True
+    debug: bool = False
 
     class Config:
         env_file = ".env"

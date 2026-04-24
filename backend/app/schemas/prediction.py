@@ -22,6 +22,20 @@ class PredictionResponse(BaseModel):
         from_attributes = True
 
 
+class GenerateRequest(BaseModel):
+    """Request para generar predicciones en batch"""
+    league_id: Optional[int] = None
+    status: Optional[str] = None
+    limit: int = Field(1000, ge=1, le=50000, description="Máximo fixtures a predecir")
+
+
+class GenerateResponse(BaseModel):
+    """Response de generación de predicciones"""
+    generated: int
+    errors: int
+    model_version: str
+
+
 # --- ValueBet ---
 class ValueBetResponse(BaseModel):
     id: int
@@ -34,7 +48,6 @@ class ValueBetResponse(BaseModel):
     result: Optional[bool] = None
     profit: Optional[float] = None
     created_at: Optional[datetime] = None
-    # Datos anidados del fixture via prediction
     fixture_id: Optional[int] = None
     home_team: Optional[str] = None
     away_team: Optional[str] = None
