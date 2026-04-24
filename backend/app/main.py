@@ -9,6 +9,7 @@ from app.middleware.auth import APIKeyMiddleware
 from app.middleware.rate_limit import RateLimitMiddleware
 from app.database import get_db, init_db
 from app.models.fixture import Fixture, Odd, League
+from app.models.fixture_feature import FixtureFeature
 from app.services.predictor import predictor
 import os
 

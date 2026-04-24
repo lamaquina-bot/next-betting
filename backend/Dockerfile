@@ -31,6 +31,9 @@ COPY alembic.ini .
 # Copiar modelo ML
 COPY models/ ./models/
 
+# Copiar datos de features
+COPY data/ ./data/
+
 # Exponer puerto
 EXPOSE 8000
 

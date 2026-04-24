@@ -1,10 +1,10 @@
 """
 Motor predictivo — carga modelo XGBoost y ejecuta predicciones.
-Modelo usa 185 features pero las más importantes son odds-based.
-Para features no disponibles, usa valores por defecto (mediana del training).
+v2: Soporta features pre-calculadas desde fixture_features table.
 """
 import joblib
 import numpy as np
+import json
 import logging
 from pathlib import Path
 from datetime import datetime
@@ -13,7 +13,6 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 # Default values for features that can't be computed from DB data
-# These are approximations - odds-based features are the most important
 FEATURE_DEFAULTS = {
     "year": 2024, "month": 6, "day_of_week": 3, "is_weekend": 0,
     "home_form_goals": 1.3, "home_form_conceded": 1.1, "home_form_points": 1.4,
@@ -97,9 +96,10 @@ class Predictor:
         self.feature_names = None
         self.model_version = "not-loaded"
         self._loaded = False
+        self.median_features = None  # Computed from DB
 
     def load_model(self, model_path: str = None):
-        """Cargar modelo desde archivo joblib (dict con model, label_encoder, feature_names)"""
+        """Cargar modelo desde archivo joblib"""
         path = Path(model_path or settings.model_path)
         if not path.exists():
             logger.warning(f"[Predictor] Modelo no encontrado en {path}")
@@ -120,111 +120,135 @@ class Predictor:
         except Exception as e:
             logger.error(f"[Predictor] Error cargando modelo: {e}")
 
-    def build_features(self, avg_home_odds: float, avg_draw_odds: float, avg_away_odds: float,
-                       match_date: datetime = None) -> np.ndarray:
-        """Construir vector de features desde odds disponibles + defaults."""
+    def build_features_from_dict(self, features_dict: dict, avg_home_odds: float = None,
+                                  avg_draw_odds: float = None, avg_away_odds: float = None,
+                                  match_date: datetime = None) -> np.ndarray:
+        """Construir vector de features desde un diccionario de features pre-calculadas."""
         if match_date is None:
             match_date = datetime.utcnow()
 
-        # Compute odds-based features (the most important ones)
+        features = {}
+        for fname in self.feature_names:
+            if fname in features_dict and features_dict[fname] is not None:
+                features[fname] = float(features_dict[fname])
+            else:
+                features[fname] = FEATURE_DEFAULTS.get(fname, 0.0)
+
+        # Override date features if available
+        features["year"] = match_date.year
+        features["month"] = match_date.month
+        features["day_of_week"] = match_date.weekday()
+        features["is_weekend"] = 1 if match_date.weekday() >= 5 else 0
+
+        # Override odds if provided (these are the most accurate)
+        if avg_home_odds and avg_home_odds > 0:
+            features["avg_odds_home"] = avg_home_odds
+            features["avg_odds_draw"] = avg_draw_odds
+            features["avg_odds_away"] = avg_away_odds
+
+            implied_home = 1.0 / avg_home_odds
+            implied_draw = 1.0 / avg_draw_odds
+            implied_away = 1.0 / avg_away_odds
+            total_implied = implied_home + implied_draw + implied_away
+            features["prob_home_norm"] = implied_home / total_implied
+            features["prob_draw_norm"] = implied_draw / total_implied
+            features["prob_away_norm"] = implied_away / total_implied
+            features["prob_diff"] = abs(features["prob_home_norm"] - features["prob_away_norm"])
+            features["bookmaker_margin"] = total_implied - 1.0
+            features["favorite_is_home"] = 1.0 if features["prob_home_norm"] > features["prob_away_norm"] else 0.0
+
+        return np.array([features.get(f, 0.0) for f in self.feature_names], dtype=np.float32)
+
+    def build_features(self, avg_home_odds: float, avg_draw_odds: float, avg_away_odds: float,
+                       match_date: datetime = None) -> np.ndarray:
+        """Construir vector de features desde odds disponibles + defaults (legacy)."""
+        if match_date is None:
+            match_date = datetime.utcnow()
+
         implied_home = 1.0 / avg_home_odds if avg_home_odds > 0 else 0.33
         implied_draw = 1.0 / avg_draw_odds if avg_draw_odds > 0 else 0.33
         implied_away = 1.0 / avg_away_odds if avg_away_odds > 0 else 0.33
 
         total_implied = implied_home + implied_draw + implied_away
         margin = total_implied - 1.0
-
-        # Normalize to remove margin
         prob_home_norm = implied_home / total_implied
         prob_draw_norm = implied_draw / total_implied
         prob_away_norm = implied_away / total_implied
-
         prob_diff = abs(prob_home_norm - prob_away_norm)
         favorite_is_home = 1.0 if prob_home_norm > prob_away_norm else 0.0
 
-        # Start with defaults
         features = {}
         for fname in self.feature_names:
             features[fname] = FEATURE_DEFAULTS.get(fname, 0.0)
 
-        # Override with computed values
         features.update({
-            "year": match_date.year,
-            "month": match_date.month,
+            "year": match_date.year, "month": match_date.month,
             "day_of_week": match_date.weekday(),
             "is_weekend": 1 if match_date.weekday() >= 5 else 0,
-            "avg_odds_home": avg_home_odds,
-            "avg_odds_draw": avg_draw_odds,
+            "avg_odds_home": avg_home_odds, "avg_odds_draw": avg_draw_odds,
             "avg_odds_away": avg_away_odds,
-            "prob_home_norm": prob_home_norm,
-            "prob_draw_norm": prob_draw_norm,
-            "prob_away_norm": prob_away_norm,
-            "prob_diff": prob_diff,
-            "bookmaker_margin": margin,
-            "favorite_is_home": favorite_is_home,
-            "implied_prob_home": implied_home,
-            "implied_prob_vs_model": 0,  # can't compute without model
+            "prob_home_norm": prob_home_norm, "prob_draw_norm": prob_draw_norm,
+            "prob_away_norm": prob_away_norm, "prob_diff": prob_diff,
+            "bookmaker_margin": margin, "favorite_is_home": favorite_is_home,
+            "implied_prob_home": implied_home, "implied_prob_vs_model": 0,
             "value_bet_score": 0,
         })
 
-        # Build array in correct order
         return np.array([features.get(f, 0.0) for f in self.feature_names], dtype=np.float32)
+
+    def predict_with_features(self, features_dict: dict, avg_home_odds: float = None,
+                               avg_draw_odds: float = None, avg_away_odds: float = None,
+                               match_date: datetime = None) -> dict:
+        """Ejecutar predicción usando features pre-calculadas desde DB."""
+        if not self._loaded or self.model is None:
+            return self._fallback_implied(avg_home_odds, avg_draw_odds, avg_away_odds)
+
+        features = self.build_features_from_dict(features_dict, avg_home_odds, avg_draw_odds,
+                                                  avg_away_odds, match_date)
+        return self._predict_array(features)
 
     def predict(self, avg_home_odds: float, avg_draw_odds: float, avg_away_odds: float,
                 match_date: datetime = None) -> dict:
-        """Ejecutar predicción sobre odds de un partido."""
+        """Ejecutar predicción sobre odds de un partido (legacy, defaults)."""
         if not self._loaded or self.model is None:
-            # Fallback: usar implied probabilities
-            h = 1.0 / avg_home_odds if avg_home_odds > 0 else 0.33
-            d = 1.0 / avg_draw_odds if avg_draw_odds > 0 else 0.33
-            a = 1.0 / avg_away_odds if avg_away_odds > 0 else 0.33
-            total = h + d + a
-            return {
-                "home_prob": round(h / total, 4),
-                "draw_prob": round(d / total, 4),
-                "away_prob": round(a / total, 4),
-                "confidence": 0.0,
-                "model_version": "odds-implied-fallback",
-            }
+            return self._fallback_implied(avg_home_odds, avg_draw_odds, avg_away_odds)
 
         features = self.build_features(avg_home_odds, avg_draw_odds, avg_away_odds, match_date)
         if features.size == 0:
-            # feature_names empty — fallback to implied probabilities
-            h = 1.0 / avg_home_odds if avg_home_odds > 0 else 0.33
-            d = 1.0 / avg_draw_odds if avg_draw_odds > 0 else 0.33
-            a = 1.0 / avg_away_odds if avg_away_odds > 0 else 0.33
-            total = h + d + a
-            return {
-                "home_prob": round(h / total, 4),
-                "draw_prob": round(d / total, 4),
-                "away_prob": round(a / total, 4),
-                "confidence": 0.0,
-                "model_version": self.model_version + "-no-features",
-            }
+            return self._fallback_implied(avg_home_odds, avg_draw_odds, avg_away_odds)
 
+        return self._predict_array(features)
+
+    def _predict_array(self, features: np.ndarray) -> dict:
+        """Run prediction on feature array."""
         probs = self.model.predict_proba(features.reshape(1, -1))[0]
 
-        # Use label_encoder classes to map probabilities correctly
         if self.label_encoder and hasattr(self.label_encoder, 'classes_'):
             classes = list(self.label_encoder.classes_)
         else:
             classes = ['A', 'D', 'H']
 
         prob_map = {cls: float(p) for cls, p in zip(classes, probs)}
-        home_prob = prob_map.get('H', 0.0)
-        draw_prob = prob_map.get('D', 0.0)
-        away_prob = prob_map.get('A', 0.0)
-
         return {
-            "home_prob": round(home_prob, 4),
-            "draw_prob": round(draw_prob, 4),
-            "away_prob": round(away_prob, 4),
+            "home_prob": round(prob_map.get('H', 0.0), 4),
+            "draw_prob": round(prob_map.get('D', 0.0), 4),
+            "away_prob": round(prob_map.get('A', 0.0), 4),
             "confidence": round(float(max(probs)), 4),
             "model_version": self.model_version,
         }
 
+    def _fallback_implied(self, h_odds, d_odds, a_odds) -> dict:
+        h = 1.0 / h_odds if h_odds and h_odds > 0 else 0.33
+        d = 1.0 / d_odds if d_odds and d_odds > 0 else 0.33
+        a = 1.0 / a_odds if a_odds and a_odds > 0 else 0.33
+        total = h + d + a
+        return {
+            "home_prob": round(h / total, 4), "draw_prob": round(d / total, 4),
+            "away_prob": round(a / total, 4), "confidence": 0.0,
+            "model_version": "odds-implied-fallback",
+        }
+
     def map_outcome(self, home_prob: float, draw_prob: float, away_prob: float) -> str:
-        """Return the predicted outcome string."""
         probs = {"home": home_prob, "draw": draw_prob, "away": away_prob}
         return max(probs, key=probs.get)
 
